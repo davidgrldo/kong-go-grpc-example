@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package inventory;
+
+import "google/api/annotations.proto";
+
+option go_package = "example.com/kong-go-grpc/proto/gen;genproto";
+
+service InventoryService {
+  // Unary call: look up stock for one SKU.
+  // company_id is passed via the X-Company-Id header (gRPC metadata),
+  // not in the request body — keeps tenant context out of the URL.
+  // The google.api.http option exposes this as GET /v1/stock/{sku}.
+  rpc GetStock(GetStockRequest) returns (GetStockResponse) {
+    option (google.api.http) = {
+      get: "/v1/stock/{sku}"
+    };
+  }
+
+  // Server-streaming call: push stock changes for a company.
+  // company_id is passed via the X-Company-Id header (gRPC metadata).
+  // NOT exposed over REST — Kong's grpc-gateway plugin only transcodes
+  // unary RPCs. Reachable only via the native "grpc" route.
+  rpc StreamStockUpdates(StreamStockRequest) returns (stream StockUpdate);
+}
+
+message GetStockRequest {
+  string sku = 1;
+}
+
+message GetStockResponse {
+  string sku = 1;
+  int32 quantity = 2;
+  string warehouse = 3;
+}
+
+message StreamStockRequest {}
+
+message StockUpdate {
+  string sku = 1;
+  int32 quantity = 2;
+  int64 updated_at_unix = 3;
+}

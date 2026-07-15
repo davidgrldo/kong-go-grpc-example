@@ -21,7 +21,10 @@ import (
 	pb "example.com/kong-go-grpc/proto/gen"
 )
 
-const listenAddr = ":50051"
+const (
+	listenAddr     = ":50051"
+	streamInterval = 500 * time.Millisecond
+)
 
 // stockStore is a fake per-company, per-SKU inventory table.
 // companyID -> sku -> quantity
@@ -138,32 +141,45 @@ func (s *inventoryServer) GetStock(ctx context.Context, req *pb.GetStockRequest)
 	}, nil
 }
 
-func (s *inventoryServer) StreamStockUpdates(req *pb.StreamStockRequest, stream pb.InventoryService_StreamStockUpdatesServer) error {
-	logIncomingMetadata(stream.Context(), "StreamStockUpdates")
+func (s *inventoryServer) StreamStockUpdates(_ *pb.StreamStockRequest, stream pb.InventoryService_StreamStockUpdatesServer) error {
+	ctx := stream.Context()
+	logIncomingMetadata(ctx, "StreamStockUpdates")
 
-	companyID, err := companyIDFromContext(stream.Context())
+	companyID, err := companyIDFromContext(ctx)
 	if err != nil {
 		return err
 	}
-	_ = companyID // demo: tidak filter per company untuk streaming
+	items, companyFound := s.store.snapshot(companyID)
+	if !companyFound {
+		return status.Errorf(codes.PermissionDenied, "company %q is not provisioned", companyID)
+	}
+	if err := ctx.Err(); err != nil {
+		return status.FromContextError(err).Err()
+	}
 
-	skus := []string{"SKU-001", "SKU-002", "SKU-777"}
-	for i, sku := range skus {
-		select {
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		default:
+	for i, item := range items {
+		if err := ctx.Err(); err != nil {
+			return status.FromContextError(err).Err()
 		}
-
 		update := &pb.StockUpdate{
-			Sku:           sku,
-			Quantity:      int32(10 * (i + 1)),
+			Sku:           item.sku,
+			Quantity:      item.quantity,
 			UpdatedAtUnix: time.Now().Unix(),
 		}
 		if err := stream.Send(update); err != nil {
 			return err
 		}
-		time.Sleep(500 * time.Millisecond)
+		if i == len(items)-1 {
+			continue
+		}
+
+		timer := time.NewTimer(streamInterval)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return status.FromContextError(ctx.Err()).Err()
+		}
 	}
 	return nil
 }

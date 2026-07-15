@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	pb "example.com/kong-go-grpc/proto/gen"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -125,4 +129,230 @@ func TestGetStockReturnsDocumentedErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+type recordedUpdate struct {
+	sku           string
+	quantity      int32
+	updatedAtUnix int64
+	sentAt        time.Time
+}
+
+type recordingStockStream struct {
+	grpc.ServerStream
+	ctx     context.Context
+	sent    []recordedUpdate
+	sendErr error
+	failAt  int
+	onSend  func(int)
+}
+
+func (s *recordingStockStream) Context() context.Context {
+	return s.ctx
+}
+
+func (s *recordingStockStream) Send(update *pb.StockUpdate) error {
+	if s.sendErr != nil && len(s.sent) == s.failAt {
+		return s.sendErr
+	}
+	s.sent = append(s.sent, recordedUpdate{
+		sku:           update.GetSku(),
+		quantity:      update.GetQuantity(),
+		updatedAtUnix: update.GetUpdatedAtUnix(),
+		sentAt:        time.Now(),
+	})
+	if s.onSend != nil {
+		s.onSend(len(s.sent))
+	}
+	return nil
+}
+
+func TestStreamStockUpdatesUsesTenantSnapshotAndExactTiming(t *testing.T) {
+	tests := []struct {
+		name    string
+		company string
+		want    []stock
+	}{
+		{name: "company A", company: "company-a", want: []stock{
+			{sku: "SKU-001", quantity: 42},
+			{sku: "SKU-002", quantity: 7},
+		}},
+		{name: "company B", company: "company-b", want: []stock{
+			{sku: "SKU-001", quantity: 100},
+			{sku: "SKU-777", quantity: 3},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				server := &inventoryServer{store: newStockStore()}
+				stream := &recordingStockStream{ctx: companyContext(t.Context(), tt.company)}
+				startedAt := time.Now()
+
+				err := server.StreamStockUpdates(&pb.StreamStockRequest{}, stream)
+				if err != nil {
+					t.Fatalf("StreamStockUpdates() error = %v", err)
+				}
+				if got, want := time.Since(startedAt), streamInterval; got != want {
+					t.Fatalf("stream duration = %v, want %v", got, want)
+				}
+				if got, want := len(stream.sent), len(tt.want); got != want {
+					t.Fatalf("sent message count = %d, want %d", got, want)
+				}
+				for i, want := range tt.want {
+					got := stream.sent[i]
+					if got.sku != want.sku || got.quantity != want.quantity {
+						t.Errorf("message %d = (%q, %d), want (%q, %d)", i, got.sku, got.quantity, want.sku, want.quantity)
+					}
+					if got.updatedAtUnix != got.sentAt.Unix() {
+						t.Errorf("message %d timestamp = %d, send Unix second = %d", i, got.updatedAtUnix, got.sentAt.Unix())
+					}
+				}
+				if got, want := stream.sent[1].sentAt.Sub(stream.sent[0].sentAt), streamInterval; got != want {
+					t.Fatalf("send interval = %v, want %v", got, want)
+				}
+			})
+		})
+	}
+}
+
+func TestStreamStockUpdatesRejectsInvalidIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "missing metadata", ctx: context.Background()},
+		{name: "empty username", ctx: incomingContext(context.Background(), "x-consumer-username", "")},
+		{name: "duplicate username", ctx: incomingContext(context.Background(),
+			"x-consumer-username", "company-a",
+			"x-consumer-username", "company-b",
+		)},
+	}
+
+	server := &inventoryServer{store: newStockStore()}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := &recordingStockStream{ctx: tt.ctx}
+			err := server.StreamStockUpdates(&pb.StreamStockRequest{}, stream)
+			if got, want := status.Code(err), codes.Unauthenticated; got != want {
+				t.Fatalf("StreamStockUpdates() code = %v, want %v; err = %v", got, want, err)
+			}
+			if len(stream.sent) != 0 {
+				t.Fatalf("invalid identity received %d messages", len(stream.sent))
+			}
+		})
+	}
+}
+
+func TestStreamStockUpdatesRejectsUnknownCompany(t *testing.T) {
+	server := &inventoryServer{store: newStockStore()}
+	stream := &recordingStockStream{ctx: companyContext(context.Background(), "company-unknown")}
+
+	err := server.StreamStockUpdates(&pb.StreamStockRequest{}, stream)
+	if got, want := status.Code(err), codes.PermissionDenied; got != want {
+		t.Fatalf("StreamStockUpdates() code = %v, want %v; err = %v", got, want, err)
+	}
+	if len(stream.sent) != 0 {
+		t.Fatalf("unknown company received %d messages", len(stream.sent))
+	}
+}
+
+func TestStreamStockUpdatesRejectsFinishedContextBeforeSend(t *testing.T) {
+	canceled, cancel := context.WithCancel(companyContext(context.Background(), "company-a"))
+	cancel()
+	expired, cancelDeadline := context.WithDeadline(
+		companyContext(context.Background(), "company-a"),
+		time.Unix(0, 0),
+	)
+	defer cancelDeadline()
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want codes.Code
+	}{
+		{name: "canceled", ctx: canceled, want: codes.Canceled},
+		{name: "deadline exceeded", ctx: expired, want: codes.DeadlineExceeded},
+	}
+	server := &inventoryServer{store: newStockStore()}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stream := &recordingStockStream{ctx: tt.ctx}
+			err := server.StreamStockUpdates(&pb.StreamStockRequest{}, stream)
+			if got := status.Code(err); got != tt.want {
+				t.Fatalf("StreamStockUpdates() code = %v, want %v; err = %v", got, tt.want, err)
+			}
+			if len(stream.sent) != 0 {
+				t.Fatalf("finished context received %d messages", len(stream.sent))
+			}
+		})
+	}
+}
+
+func TestStreamStockUpdatesStopsOnCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &inventoryServer{store: newStockStore()}
+		ctx, cancel := context.WithCancel(companyContext(t.Context(), "company-a"))
+		stream := &recordingStockStream{ctx: ctx}
+		stream.onSend = func(count int) {
+			if count == 1 {
+				cancel()
+			}
+		}
+		startedAt := time.Now()
+
+		err := server.StreamStockUpdates(&pb.StreamStockRequest{}, stream)
+		if got, want := status.Code(err), codes.Canceled; got != want {
+			t.Fatalf("StreamStockUpdates() code = %v, want %v; err = %v", got, want, err)
+		}
+		if got, want := len(stream.sent), 1; got != want {
+			t.Fatalf("sent message count = %d, want %d", got, want)
+		}
+		if got := time.Since(startedAt); got != 0 {
+			t.Fatalf("canceled stream duration = %v, want 0", got)
+		}
+	})
+}
+
+func TestStreamStockUpdatesStopsOnDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &inventoryServer{store: newStockStore()}
+		ctx, cancel := context.WithTimeout(companyContext(t.Context(), "company-a"), 250*time.Millisecond)
+		defer cancel()
+		stream := &recordingStockStream{ctx: ctx}
+		startedAt := time.Now()
+
+		err := server.StreamStockUpdates(&pb.StreamStockRequest{}, stream)
+		if got, want := status.Code(err), codes.DeadlineExceeded; got != want {
+			t.Fatalf("StreamStockUpdates() code = %v, want %v; err = %v", got, want, err)
+		}
+		if got, want := len(stream.sent), 1; got != want {
+			t.Fatalf("sent message count = %d, want %d", got, want)
+		}
+		if got, want := time.Since(startedAt), 250*time.Millisecond; got != want {
+			t.Fatalf("deadline stream duration = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestStreamStockUpdatesReturnsSendErrorUnchanged(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &inventoryServer{store: newStockStore()}
+		wantErr := errors.New("send failed")
+		stream := &recordingStockStream{
+			ctx:     companyContext(t.Context(), "company-a"),
+			sendErr: wantErr,
+			failAt:  0,
+		}
+		startedAt := time.Now()
+
+		err := server.StreamStockUpdates(&pb.StreamStockRequest{}, stream)
+		if err != wantErr {
+			t.Fatalf("StreamStockUpdates() error = %v, want %v", err, wantErr)
+		}
+		if got := time.Since(startedAt); got != 0 {
+			t.Fatalf("failed stream duration = %v, want 0", got)
+		}
+	})
 }

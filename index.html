@@ -39,23 +39,27 @@
   <body>
     <h3>Cek stok (browser -&gt; Kong REST -&gt; gRPC service)</h3>
     <p style="font-size: 13px; color: #555">
-      Ini memanggil <code>GET /v1/stock/{sku}</code> dengan header
-      <code>X-Company-Id</code> di Kong (port 8000). Kong men-transcode request
-      JSON ini jadi call gRPC ke inventory-service, lalu hasilnya di-encode
-      balik jadi JSON di sini. Tidak ada kode gRPC apa pun di halaman ini —
-      browser tidak pernah bicara gRPC langsung.
+      Halaman ini memanggil <code>GET /v1/stock/{sku}</code> dengan demo
+      <code>apikey</code> di Kong (port 8000). Kong memvalidasi key, menentukan
+      Consumer, lalu men-transcode HTTP GET menjadi call gRPC ke
+      inventory-service. Demo key ini publik dan hanya untuk stack lokal.
     </p>
 
-    <label
-      >Kong base URL
+    <label>
+      Kong base URL
       <input id="base" value="http://localhost:8000" />
     </label>
-    <label
-      >Company ID
-      <input id="company" value="company-a" />
+    <label>
+      Demo API key
+      <input
+        id="apikey"
+        type="password"
+        value="company-a-demo-key"
+        autocomplete="off"
+      />
     </label>
-    <label
-      >SKU
+    <label>
+      SKU
       <input id="sku" value="SKU-001" />
     </label>
 
@@ -66,20 +70,27 @@
     <script>
       async function checkStock() {
         const base = document.getElementById("base").value.replace(/\/$/, "");
-        const company = document.getElementById("company").value;
+        const apikey = document.getElementById("apikey").value;
         const sku = encodeURIComponent(document.getElementById("sku").value);
         const out = document.getElementById("out");
         const url = `${base}/v1/stock/${sku}`;
 
-        out.textContent = `GET ${url}\nX-Company-Id: ${company} ...`;
+        out.textContent = `GET ${url}\napikey: [hidden]\n\nMemproses request`;
         try {
           const res = await fetch(url, {
-            headers: { "X-Company-Id": company },
+            headers: { apikey },
           });
           const body = await res.text();
-          out.textContent = `HTTP ${res.status}\n\n${body}`;
+          if (res.ok) {
+            out.textContent = `HTTP ${res.status}\n\n${body}`;
+            return;
+          }
+
+          const grpcMessage = res.headers.get("grpc-message");
+          const detail = body || grpcMessage || res.statusText || "Request failed";
+          out.textContent = `HTTP ${res.status}\n\n${detail}`;
         } catch (err) {
-          out.textContent = `Gagal fetch: ${err.message}\n\nKemungkinan CORS diblok Kong secara default, atau Kong belum jalan di ${base}.`;
+          out.textContent = `Gagal fetch: ${err.message}\n\nPastikan Kong aktif di ${base} dan CORS mengizinkan origin halaman ini.`;
         }
       }
     </script>

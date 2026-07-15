@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+*.log
+coverage.out
+README.md
+docs/
+docker-compose.yml
+kong.yml
+index.html
+Makefile
+inventory.proto
+third_party/

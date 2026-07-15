@@ -1,49 +1,54 @@
 _format_version: "3.0"
 _transform: true
 
+consumers:
+  - username: company-a
+    keyauth_credentials:
+      - key: company-a-demo-key
+
+  - username: company-b
+    keyauth_credentials:
+      - key: company-b-demo-key
+
 services:
-  # Same upstream, same protocol=grpc — Kong always talks native gRPC to the
-  # service. What differs is which ROUTE the caller hits: native "grpc" for
-  # gRPC clients, or "http" (below) for browsers, which Kong transcodes.
   - name: inventory-grpc-service
     protocol: grpc
-    host: inventory-service # docker-compose service name; resolved via the compose network
+    host: inventory-service
     port: 50051
     routes:
       - name: inventory-grpc-route
         protocols:
           - grpc
         hosts:
-          - inventory.local # native gRPC client must send this as :authority — see client/main.go
+          - inventory.local
 
       - name: inventory-rest-route
         protocols:
           - http
         paths:
           - /v1/stock
+
     plugins:
-      # Local, in-memory rate limiting so the demo shows a plugin actually
-      # running in the gRPC path, not just proxying. Swap policy: redis for
-      # anything beyond a single Kong node. Applied at service level, so it
-      # covers both routes above.
+      - name: key-auth
+        config:
+          key_names:
+            - apikey
+          key_in_header: true
+          key_in_query: false
+          key_in_body: false
+          hide_credentials: true
+          run_on_preflight: false
+
       - name: rate-limiting
         config:
           minute: 100
           policy: local
 
-      # Transcodes REST/JSON <-> gRPC for the browser-facing route only.
-      # Only unary RPCs are transcoded (GetStock) — see proto/inventory.proto.
-      # The mounted proto dir must also contain google/api/{annotations,http}.proto
-      # (vendored under third_party/) or Kong fails with "No such file or directory".
       - name: grpc-gateway
         route: inventory-rest-route
         config:
           proto: /kong/proto/inventory.proto
 
-      # Without this, the browser blocks the fetch() in web/index.html with a
-      # CORS error, since that page is served from a different origin than
-      # localhost:8000. "*" is fine for a local demo — scope it down for
-      # anything real (specific origins, no credentials wildcard).
       - name: cors
         route: inventory-rest-route
         config:
@@ -54,4 +59,8 @@ services:
           headers:
             - Accept
             - Content-Type
-            - X-Company-Id
+            - apikey
+          exposed_headers:
+            - grpc-status
+            - grpc-message
+          preflight_continue: false

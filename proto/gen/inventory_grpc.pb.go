@@ -28,14 +28,14 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type InventoryServiceClient interface {
 	// Unary call: look up stock for one SKU.
-	// company_id is passed via the X-Company-Id header (gRPC metadata),
-	// not in the request body — keeps tenant context out of the URL.
+	// Kong Key Auth injects the authenticated Consumer username as
+	// x-consumer-username metadata; tenant identity is not part of the request.
 	// The google.api.http option exposes this as GET /v1/stock/{sku}.
 	GetStock(ctx context.Context, in *GetStockRequest, opts ...grpc.CallOption) (*GetStockResponse, error)
-	// Server-streaming call: push stock changes for a company.
-	// company_id is passed via the X-Company-Id header (gRPC metadata).
-	// NOT exposed over REST — Kong's grpc-gateway plugin only transcodes
-	// unary RPCs. Reachable only via the native "grpc" route.
+	// Server-streaming call: push the authenticated Consumer's stock snapshot.
+	// Kong Key Auth injects tenant identity as x-consumer-username metadata.
+	// NOT exposed over REST: Kong's grpc-gateway plugin transcodes unary RPCs.
+	// Reach this method through the native gRPC route.
 	StreamStockUpdates(ctx context.Context, in *StreamStockRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StockUpdate], error)
 }
 
@@ -81,14 +81,14 @@ type InventoryService_StreamStockUpdatesClient = grpc.ServerStreamingClient[Stoc
 // for forward compatibility.
 type InventoryServiceServer interface {
 	// Unary call: look up stock for one SKU.
-	// company_id is passed via the X-Company-Id header (gRPC metadata),
-	// not in the request body — keeps tenant context out of the URL.
+	// Kong Key Auth injects the authenticated Consumer username as
+	// x-consumer-username metadata; tenant identity is not part of the request.
 	// The google.api.http option exposes this as GET /v1/stock/{sku}.
 	GetStock(context.Context, *GetStockRequest) (*GetStockResponse, error)
-	// Server-streaming call: push stock changes for a company.
-	// company_id is passed via the X-Company-Id header (gRPC metadata).
-	// NOT exposed over REST — Kong's grpc-gateway plugin only transcodes
-	// unary RPCs. Reachable only via the native "grpc" route.
+	// Server-streaming call: push the authenticated Consumer's stock snapshot.
+	// Kong Key Auth injects tenant identity as x-consumer-username metadata.
+	// NOT exposed over REST: Kong's grpc-gateway plugin transcodes unary RPCs.
+	// Reach this method through the native gRPC route.
 	StreamStockUpdates(*StreamStockRequest, grpc.ServerStreamingServer[StockUpdate]) error
 	mustEmbedUnimplementedInventoryServiceServer()
 }

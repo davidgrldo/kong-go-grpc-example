@@ -262,6 +262,33 @@ Temporary containers and networks must be removed, and only intended files may r
 
 Implementation remains on `codex/harden-multitenant-demo` in the fork. After local review, checks, and an intentional commit, the branch is pushed to `davidgrldo/kong-go-grpc-example`. The eventual PR is opened as a draft from that branch to `revell29/kong-go-grpc-example:master`.
 
+## Approved Addendum: README Architecture Diagrams
+
+The short text-only architecture sketch in `README.md` will be replaced with
+two GitHub-rendered Mermaid diagrams. No generated image, PlantUML renderer, or
+new dependency is introduced.
+
+The first diagram is a component overview. It shows the browser and native
+gRPC client entering the two Kong routes on `127.0.0.1:8000`, the plugins that
+apply to each route, Kong's trusted Consumer metadata injection, and the
+unpublished inventory service on the Compose network at port `50051`.
+
+The second diagram is a sequence view with separate REST and native gRPC
+flows. The REST flow shows `apikey` authentication, unary transcoding, trusted
+`x-consumer-username` metadata, and the JSON response. The native flow shows
+the `inventory.local` authority, the same authentication boundary, and both
+unary and server-streaming responses.
+
+Both diagrams must preserve these security and protocol facts:
+
+- clients supply `apikey`, never a trusted tenant identity header;
+- Key Auth and rate limiting are service-scoped and cover both routes;
+- gRPC Gateway and CORS apply only to the REST route;
+- only `GetStock` is REST-transcoded;
+- `StreamStockUpdates` is available only through native gRPC;
+- Kong strips the API key and injects `X-Consumer-Username` upstream;
+- inventory port `50051` remains internal and unpublished.
+
 ## References
 
 - [Kong Key Auth](https://developer.konghq.com/plugins/key-auth/)

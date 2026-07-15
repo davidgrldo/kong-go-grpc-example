@@ -1,17 +1,14 @@
 // Command server implements a small multi-tenant gRPC InventoryService.
-// It is meant to sit *behind* Kong: Kong terminates the gRPC route and
-// proxies to this service over plaintext HTTP/2 on port 50051.
-//
-// It also demonstrates reading metadata that Kong/plugins typically inject
-// upstream (e.g. X-Consumer-Id from a key-auth plugin, X-Forwarded-Host,
-// X-Forwarded-Proto) so you can see what a real gateway-fronted service
-// would have available for tenant resolution / auditing.
+// It sits behind Kong, which authenticates callers and injects the matched
+// Consumer username for tenant resolution before proxying plaintext HTTP/2
+// to this unpublished service on port 50051.
 package main
 
 import (
 	"context"
 	"log"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -42,15 +39,40 @@ func newStockStore() *stockStore {
 	}
 }
 
-func (s *stockStore) get(company, sku string) (int32, bool) {
+type stock struct {
+	sku      string
+	quantity int32
+}
+
+func (s *stockStore) get(company, sku string) (quantity int32, companyFound, skuFound bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	companyStock, companyFound := s.data[company]
+	if !companyFound {
+		return 0, false, false
+	}
+	quantity, skuFound = companyStock[sku]
+	return quantity, true, skuFound
+}
+
+func (s *stockStore) snapshot(company string) ([]stock, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	companyStock, ok := s.data[company]
 	if !ok {
-		return 0, false
+		return nil, false
 	}
-	qty, ok := companyStock[sku]
-	return qty, ok
+
+	result := make([]stock, 0, len(companyStock))
+	for sku, quantity := range companyStock {
+		result = append(result, stock{sku: sku, quantity: quantity})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].sku < result[j].sku
+	})
+	return result, true
 }
 
 type inventoryServer struct {
@@ -64,9 +86,15 @@ func logIncomingMetadata(ctx context.Context, rpcName string) {
 		log.Printf("[%s] no metadata on request", rpcName)
 		return
 	}
-	for _, key := range []string{":authority", "x-forwarded-host", "x-forwarded-proto", "x-company-id", "x-consumer-id", "x-consumer-username"} {
-		if v := md.Get(key); len(v) > 0 {
-			log.Printf("[%s] metadata %s = %v", rpcName, key, v)
+	for _, key := range []string{
+		":authority",
+		"x-forwarded-host",
+		"x-forwarded-proto",
+		"x-consumer-id",
+		"x-consumer-username",
+	} {
+		if values := md.Get(key); len(values) > 0 {
+			log.Printf("[%s] metadata %s = %v", rpcName, key, values)
 		}
 	}
 }
@@ -74,13 +102,13 @@ func logIncomingMetadata(ctx context.Context, rpcName string) {
 func companyIDFromContext(ctx context.Context) (string, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return "", status.Error(codes.InvalidArgument, "missing metadata")
+		return "", status.Error(codes.Unauthenticated, "authenticated consumer metadata is required")
 	}
-	vals := md.Get("x-company-id")
-	if len(vals) == 0 || vals[0] == "" {
-		return "", status.Error(codes.InvalidArgument, "x-company-id header is required")
+	values := md.Get("x-consumer-username")
+	if len(values) != 1 || values[0] == "" {
+		return "", status.Error(codes.Unauthenticated, "exactly one x-consumer-username value is required")
 	}
-	return vals[0], nil
+	return values[0], nil
 }
 
 func (s *inventoryServer) GetStock(ctx context.Context, req *pb.GetStockRequest) (*pb.GetStockResponse, error) {
@@ -95,14 +123,17 @@ func (s *inventoryServer) GetStock(ctx context.Context, req *pb.GetStockRequest)
 		return nil, status.Error(codes.InvalidArgument, "sku is required")
 	}
 
-	qty, ok := s.store.get(companyID, req.GetSku())
-	if !ok {
+	quantity, companyFound, skuFound := s.store.get(companyID, req.GetSku())
+	if !companyFound {
+		return nil, status.Errorf(codes.PermissionDenied, "company %q is not provisioned", companyID)
+	}
+	if !skuFound {
 		return nil, status.Errorf(codes.NotFound, "sku %q not found for company %q", req.GetSku(), companyID)
 	}
 
 	return &pb.GetStockResponse{
 		Sku:       req.GetSku(),
-		Quantity:  qty,
+		Quantity:  quantity,
 		Warehouse: "WH-JKT-01",
 	}, nil
 }

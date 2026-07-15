@@ -232,9 +232,10 @@ Production transport controls should follow the actual threat model. TLS or
 mTLS may be appropriate depending on network trust, identity, and compliance
 requirements; neither transport is claimed to be universally mandatory here.
 
-The selected supported Kong LTS is the Enterprise distribution
-`kong/kong-gateway:3.14.0.8-ubuntu`, operating in deprecated unlicensed free
-mode for this local demo.
+The selected image, `kong/kong-gateway:3.14.0.8-ubuntu`, is Kong Gateway
+Enterprise 3.14 LTS. Free Mode is no longer available starting in 3.10; this
+local demo starts without a license and therefore follows expired-license
+behavior. It must not be presented as licensed or supported production use.
 
 ## Repository layout
 

@@ -4,6 +4,19 @@ This repository is a local multi-tenant inventory demo. Kong Key Auth identifies
 each tenant, proxies native gRPC, and transcodes REST requests to the same Go
 gRPC service.
 
+## Why this demo exists
+
+This repository is a runnable companion to Jubelio's Engineering Sharing
+Session, "Kong API Gateway: Why we're moving off KrakenD — and what we get in
+return." It turns the presentation's concepts—Routes, Services, Consumers,
+authentication, plugin scopes, rate limiting, and gRPC support—into a small
+demo that can be exercised locally.
+
+The demo intentionally uses a DB-less Kong deployment and simplified Consumers
+(`company-a` and `company-b`). It supports the presentation's technical
+narrative, but does not reproduce Jubelio's production Hybrid deployment, Kong
+Manager, Upstream health checks, or custom Lua plugins.
+
 ## Trust boundary and request flow
 
 Tenant identity follows one trusted path:

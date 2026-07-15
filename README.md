@@ -1,164 +1,127 @@
 # Kong + gRPC (Go)
 
-Demo Kong sebagai API gateway di depan gRPC service multi-company. Kong
-proxy gRPC over plaintext HTTP/2 (h2c) — tanpa TLS — agar demo sederhana.
-`company_id` dikirim via header `X-Company-Id`, bukan di URL params.
+This repository is a local multi-tenant inventory demo. Kong Key Auth identifies
+each tenant, proxies native gRPC, and transcodes REST requests to the same Go
+gRPC service.
 
-## Arsitektur
+## Trust boundary and request flow
 
-Satu upstream service, dua route di Kong. Kong selalu bicara native gRPC
-ke service — yang berbeda hanya route mana yang dipakai caller.
+Tenant identity follows one trusted path:
 
-```
-┌──────────────────┐                     ┌──────────────────────────────────────┐                     ┌─────────────────────┐
-│  gRPC Client     │                     │  Kong :8000                          │                     │  inventory-service  │
-│  (grpcurl/Go)    │──── h2c ──────────>│                                      │──── h2c ──────────>│  :50051             │
-│                  │  :authority=       │  Route 1: [grpc]                     │  protocol=grpc      │  (main.go)          │
-│                  │  inventory.local   │  match: host=inventory.local          │                     │                     │
-└──────────────────┘                     │                                      │                     │  GetStock (unary)   │
-                                         │  plugins:                            │                     │  StreamStockUpdates │
-┌──────────────────┐                     │  - rate-limiting (100/min)           │                     │  (server-streaming) │
-│  Browser         │──── HTTP GET ──────>│                                      │                     └─────────────────────┘
-│  (index.html)    │  /v1/stock/{sku}   │  Route 2: [http]                     │
-│                  │  X-Company-Id: ...  │  match: path=/v1/stock                │
-└──────────────────┘                     │                                      │
-                                         │  plugins:                            │
-                                         │  - rate-limiting (100/min)           │
-                                         │  - grpc-gateway (JSON ↔ protobuf)   │
-                                         │  - cors (origins: *)                 │
-                                         └──────────────────────────────────────┘
+```text
+client apikey -> Kong Key Auth -> X-Consumer-Username -> Go inventory map
 ```
 
-### Cara kerja routing
+The client supplies only an `apikey`. Kong validates it, injects the matched
+Consumer username, and does not forward the credential upstream. The Go service
+uses only that authenticated Consumer metadata to select a company inventory
+map, so caller-supplied tenant identity cannot select another tenant.
 
-**Route 1 — Native gRPC** (`protocol: grpc`, match by `hosts`):
+The inventory service listens on container port `50051`, but that port is
+unpublished and is reachable only from the Compose network. Clients enter
+through Kong on `127.0.0.1:8000`.
 
-1. Client dial Kong `:8000`, set header `:authority=inventory.local`
-2. Kong match route `grpc` berdasarkan host `inventory.local`
-3. Kong proxy ke `inventory-service:50051` via h2c (plaintext HTTP/2)
-4. Service proses gRPC call, return protobuf response
-5. Kong proxy balik ke client
+## Architecture
 
-**Route 2 — REST/Browser** (`protocol: http`, match by `paths`):
+The single loopback proxy port `127.0.0.1:8000` accepts both HTTP/1.1 REST and
+plaintext HTTP/2 gRPC (h2c):
 
-1. Browser `GET http://localhost:8000/v1/stock/SKU-001` dengan header `X-Company-Id: company-a`
-2. Kong match route `http` berdasarkan path `/v1/stock`
-3. Plugin `grpc-gateway` baca `inventory.proto`, transcode HTTP request → gRPC call
-4. Kong forward header `X-Company-Id` sebagai gRPC metadata `x-company-id`
-5. Kong proxy gRPC call ke `inventory-service:50051`
-6. Service baca `x-company-id` dari metadata, lookup stok per company
-7. Service return protobuf → `grpc-gateway` encode balik jadi JSON
-8. Browser terima JSON
-
-> **Limitasi**: `grpc-gateway` hanya transcode unary RPC. `GetStock` bisa
-> lewat REST; `StreamStockUpdates` hanya lewat native gRPC route. Untuk
-> streaming di browser butuh `grpc-web` plugin + JS stub.
-
-## Struktur file
-
-```
-.
-├── main.go                          # gRPC server (InventoryService, port :50051)
-├── inventory.proto                  # proto definition (GetStock + StreamStockUpdates)
-├── proto/gen/                       # generated pb.go & grpc.pb.go (dari make proto)
-├── kong.yml                         # Kong declarative config (DB-less)
-├── docker-compose.yml               # Kong 3.7 + inventory-service
-├── Dockerfile                       # multi-stage build untuk inventory-service
-├── index.html                       # browser client (plain HTML/JS, fetch ke Kong)
-├── third_party/google/api/          # annotations.proto + http.proto (untuk grpc-gateway)
-├── Makefile                         # proto, tidy, up, down, logs, run-server
-├── go.mod / go.sum                  # Go module: example.com/kong-go-grpc
-└── README.md
+```text
+REST client -- HTTP/1.1 --> Kong :8000 -- gRPC/h2c --> inventory-service :50051
+gRPC client -- HTTP/2  --> Kong :8000 -- gRPC/h2c --> inventory-service :50051
 ```
 
-### Komponen
+The native gRPC route is selected with the `inventory.local` authority. The
+REST route exposes `GET /v1/stock/{sku}` through Kong's `grpc-gateway` plugin.
+Only the unary `GetStock` RPC is transcoded; `StreamStockUpdates` is available
+only through native gRPC.
 
-- **`main.go`** — gRPC server. In-memory store untuk 2 company (`company-a`,
-  `company-b`). Baca `company_id` dari header `X-Company-Id` (gRPC metadata).
-  Log metadata `x-consumer-*` / `x-forwarded-*` yang di-inject Kong. Reflection
-  diaktifkan agar `grpcurl` bisa pakai tanpa file `.proto`.
-- **`inventory.proto`** — `InventoryService` dengan 2 RPC:
-  - `GetStock(GetStockRequest) → GetStockResponse` (unary, REST-compatible)
-  - `StreamStockUpdates(StreamStockRequest) → stream StockUpdate` (server-streaming)
-- **`kong.yml`** — DB-less config: 1 service (`protocol: grpc`), 2 routes
-  (`grpc` + `http`), 3 plugins (`rate-limiting`, `grpc-gateway`, `cors`).
-- **`index.html`** — plain HTML/JS, `fetch()` ke Kong. Tidak tahu gRPC.
-- **`third_party/google/api/`** — `annotations.proto` + `http.proto` untuk
-  `google.api.http` option yang dibaca `grpc-gateway` plugin.
+Key Auth and local rate limiting apply at the Kong service level, so they cover
+both routes. CORS applies to the REST route and handles browser preflights
+locally.
 
-## Setup
+## Demo credentials
 
-Prasyarat: Go 1.25+, `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc`,
-Docker/Docker Compose.
+| Consumer | Demo API key |
+| --- | --- |
+| `company-a` | `company-a-demo-key` |
+| `company-b` | `company-b-demo-key` |
+
+Both keys are public, static demo credentials and are local-only. They are not
+secrets and must not be reused outside this demo.
+
+## Prerequisites and startup
+
+Install or provide:
+
+- Go 1.25.3 or newer;
+- `protoc 35.1`;
+- Docker with Docker Compose;
+- `curl`, `jq`, and `grpcurl`.
+
+If `grpcurl` is not already available, install the pinned release:
 
 ```bash
-# Install protoc plugins (sekali saja)
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-
-# 1. Generate proto code (auto-download google/api protos jika belum ada)
-make proto
-
-# 2. Resolve dependencies
-make tidy
-
-# 3. Jalankan Kong + service via Docker
-make up
-
-# 4. Atau jalankan service langsung (tanpa Docker)
-make run-server
+GOBIN=~/.local/bin go install github.com/fullstorydev/grpcurl/cmd/grpcurl@v1.9.3
 ```
 
-## API Reference
+Ensure `~/.local/bin` is on `PATH`, then use these repository commands:
 
-### RPC 1: `GetStock` (Unary)
+```bash
+make proto
+make proto-check
+make up
+make reload
+make logs
+make down
+```
 
-Cek stok untuk satu SKU. `company_id` dikirim via header `X-Company-Id`,
-bukan di URL atau request body.
+- `make proto` verifies the pinned generator toolchain and regenerates the Go
+  protobuf files.
+- `make proto-check` regenerates the files and fails if the checked-in output
+  differs.
+- `make up` builds and starts the full Compose stack, waiting for readiness.
+- `make reload` validates and gracefully reloads the bind-mounted DB-less Kong
+  configuration.
+- `make logs` follows logs from both services.
+- `make down` removes the local Compose containers and network.
 
-|                    |                                               |
-| ------------------ | --------------------------------------------- |
-| **gRPC method**    | `inventory.InventoryService/GetStock`         |
-| **Type**           | Unary (request → response)                    |
-| **REST endpoint**  | `GET /v1/stock/{sku}`                         |
-| **Header**         | `X-Company-Id: <company_id>` (required)       |
-| **Accessible via** | Native gRPC route + REST route (grpc-gateway) |
+## API examples
 
-**Request — `GetStockRequest`**
+### REST `GetStock`
 
-| Field | Type     | Required | Description                            |
-| ----- | -------- | -------- | -------------------------------------- |
-| `sku` | `string` | yes      | Kode SKU, contoh: `SKU-001`, `SKU-002` |
+Company A:
 
-> `company_id` tidak ada di proto request — dikirim via header
-> `X-Company-Id` (gRPC metadata `x-company-id`). Server baca dari
-> `metadata.FromIncomingContext(ctx)`.
+```bash
+curl -H 'apikey: company-a-demo-key' \
+  http://localhost:8000/v1/stock/SKU-001
+```
 
-**Response — `GetStockResponse`**
+```json
+{"sku":"SKU-001","quantity":42,"warehouse":"WH-JKT-01"}
+```
 
-| Field       | Type     | Description                              |
-| ----------- | -------- | ---------------------------------------- |
-| `sku`       | `string` | SKU yang diminta                         |
-| `quantity`  | `int32`  | Jumlah stok tersedia                     |
-| `warehouse` | `string` | Kode gudang (selalu `WH-JKT-01` di demo) |
+Company B requests the same SKU but receives its own quantity:
 
-**Error codes**
+```bash
+curl -H 'apikey: company-b-demo-key' \
+  http://localhost:8000/v1/stock/SKU-001
+```
 
-| Code              | Condition                                      |
-| ----------------- | ---------------------------------------------- |
-| `InvalidArgument` | `X-Company-Id` header kosong atau `sku` kosong |
-| `NotFound`        | SKU tidak ditemukan untuk company tersebut     |
+```json
+{"sku":"SKU-001","quantity":100,"warehouse":"WH-JKT-01"}
+```
 
-**Contoh (gRPC)**
+### Native gRPC `GetStock`
+
+Company A:
 
 ```bash
 grpcurl -plaintext -authority inventory.local \
-  -H 'x-company-id: company-a' \
+  -H 'apikey: company-a-demo-key' \
   -d '{"sku":"SKU-001"}' \
   localhost:8000 inventory.InventoryService/GetStock
 ```
-
-Response:
 
 ```json
 {
@@ -168,100 +131,135 @@ Response:
 }
 ```
 
-**Contoh (REST)**
-
-```bash
-curl -H "X-Company-Id: company-a" \
-  "http://localhost:8000/v1/stock/SKU-001"
-```
-
-Response:
-
-```json
-{ "sku": "SKU-001", "quantity": 42, "warehouse": "WH-JKT-01" }
-```
-
----
-
-### RPC 2: `StreamStockUpdates` (Server-Streaming)
-
-Push update stok untuk semua SKU. `company_id` dikirim via header
-`X-Company-Id`. Server mengirim 3 update dengan interval 500ms per item,
-lalu menutup stream.
-
-|                    |                                                         |
-| ------------------ | ------------------------------------------------------- |
-| **gRPC method**    | `inventory.InventoryService/StreamStockUpdates`         |
-| **Type**           | Server-streaming (request → stream of responses)        |
-| **REST endpoint**  | ❌ Tidak ada — `grpc-gateway` hanya transcode unary RPC |
-| **Header**         | `X-Company-Id: <company_id>` (required)                 |
-| **Accessible via** | Native gRPC route only                                  |
-
-**Request — `StreamStockRequest`**
-
-Kosong — tidak ada field. `company_id` dikirim via header `X-Company-Id`.
-
-**Stream response — `StockUpdate` (3 messages)**
-
-| #   | `sku`     | `quantity` | `updated_at_unix` |
-| --- | --------- | ---------- | ----------------- |
-| 1   | `SKU-001` | `10`       | `<timestamp>`     |
-| 2   | `SKU-002` | `20`       | `<timestamp>`     |
-| 3   | `SKU-777` | `30`       | `<timestamp>`     |
-
-**Error codes**
-
-| Code              | Condition                    |
-| ----------------- | ---------------------------- |
-| `InvalidArgument` | `X-Company-Id` header kosong |
-
-**Contoh (gRPC only)**
+Company B:
 
 ```bash
 grpcurl -plaintext -authority inventory.local \
-  -H 'x-company-id: company-a' \
+  -H 'apikey: company-b-demo-key' \
+  -d '{"sku":"SKU-001"}' \
+  localhost:8000 inventory.InventoryService/GetStock
+```
+
+```json
+{
+  "sku": "SKU-001",
+  "quantity": 100,
+  "warehouse": "WH-JKT-01"
+}
+```
+
+### Native gRPC `StreamStockUpdates`
+
+Company A:
+
+```bash
+grpcurl -plaintext -authority inventory.local \
+  -H 'apikey: company-a-demo-key' \
   -d '{}' \
   localhost:8000 inventory.InventoryService/StreamStockUpdates
 ```
 
-Response (3 messages, 500ms interval):
-
 ```json
-{"sku":"SKU-001","quantity":10,"updatedAtUnix":1720948800}
-{"sku":"SKU-002","quantity":20,"updatedAtUnix":1720948800}
-{"sku":"SKU-777","quantity":30,"updatedAtUnix":1720948800}
+{"sku":"SKU-001","quantity":42,"updatedAtUnix":"1784102400"}
+{"sku":"SKU-002","quantity":7,"updatedAtUnix":"1784102401"}
 ```
 
----
+Company B:
 
-### Sample data
+```bash
+grpcurl -plaintext -authority inventory.local \
+  -H 'apikey: company-b-demo-key' \
+  -d '{}' \
+  localhost:8000 inventory.InventoryService/StreamStockUpdates
+```
 
-| Company     | SKU       | Quantity |
-| ----------- | --------- | -------- |
-| `company-a` | `SKU-001` | 42       |
-| `company-a` | `SKU-002` | 7        |
-| `company-b` | `SKU-001` | 100      |
-| `company-b` | `SKU-777` | 3        |
+```json
+{"sku":"SKU-001","quantity":100,"updatedAtUnix":"1784102400"}
+{"sku":"SKU-777","quantity":3,"updatedAtUnix":"1784102401"}
+```
 
-### Metadata yang di-log
+Each stream contains the authenticated tenant's two records in SKU order.
+`updatedAtUnix` is shown as a quoted decimal string because ProtoJSON encodes
+`int64` values as strings; its runtime value changes on every execution.
 
-Server mencatat header berikut jika Kong/plugin meng-inject-nya:
+## Error behavior
 
-| Header                | Source               | Ada jika                     |
-| --------------------- | -------------------- | ---------------------------- |
-| `:authority`          | HTTP/2 pseudo-header | Selalu (gRPC client set ini) |
-| `x-forwarded-host`    | Kong core            | Selalu saat le wat Kong      |
-| `x-forwarded-proto`   | Kong core            | Selalu saat lewat Kong       |
-| `x-company-id`        | Client header        | Selalu (client wajib set)    |
-| `x-consumer-id`       | key-auth/JWT plugin  | Hanya jika auth plugin aktif |
-| `x-consumer-username` | key-auth/JWT plugin  | Hanya jika auth plugin aktif |
+Kong rejects a missing or invalid API key before the request reaches the Go
+service. After successful authentication, the gRPC service follows this error
+contract:
 
-## Yang di-skip (bukan untuk production)
+| Condition | Result |
+| --- | --- |
+| Missing or invalid API key at Kong | unauthenticated request rejected before upstream |
+| Missing, empty, or ambiguous consumer metadata | `Unauthenticated` |
+| Authenticated consumer without a company map | `PermissionDenied` |
+| Empty SKU | `InvalidArgument` |
+| Missing SKU for a known company | `NotFound` |
+| Stream canceled | `Canceled` |
+| Stream deadline exceeded | `DeadlineExceeded` |
+| Stream send failure | original send error |
 
-- **No TLS** — pakai plaintext h2c. Production harus pakai `grpcs` + cert.
-- **No auth** — tidak ada key-auth/JWT/mTLS. Siapa saja yang bisa akses
-  port 8000 bisa call service.
-- **No persistence** — data stok in-memory, reset saat restart.
-- **CORS `*`** — terbuka lebar, scope ke origin spesifik untuk production.
-- **Kong 3.6 ke bawah** — tidak bisa serve HTTP/2 + HTTP/1.1 di socket yang
-  sama. Tidak relevan di sini karena port 8000 dedicated untuk gRPC.
+For REST-transcoded calls, Kong maps the upstream gRPC status to an HTTP
+response. The CORS configuration exposes `grpc-status` and `grpc-message` so
+browser JavaScript can display error detail.
+
+## Readiness and exposed ports
+
+Compose checks inventory readiness with a TCP connection to `50051`. Kong's
+healthcheck then requires HTTP 200 from its internal `/status/ready` endpoint.
+`make up` runs `docker compose up --build -d --wait`, so it returns only after
+both containers report healthy.
+
+Kong's Admin API is disabled. Its Status API is bound only inside the Kong
+container, the inventory port is not published, and the TLS proxy listener is
+not enabled. The only published host port is `127.0.0.1:8000`, shared by
+HTTP/1.1 REST and plaintext HTTP/2 gRPC traffic.
+
+After editing `kong.yml`, `make reload` validates and gracefully reloads the
+declarative configuration without recreating the stack.
+
+## Local-demo limitations
+
+- All proxy and upstream gRPC traffic uses plaintext h2c.
+- Both API keys are static, public, local-only credentials.
+- Inventory data is held in memory.
+- Rate limiting uses Kong's local policy and is not shared across nodes.
+- CORS permits every origin for the demo REST route.
+- There is no persistence; restarting the service restores the compiled sample
+  data.
+
+Production transport controls should follow the actual threat model. TLS or
+mTLS may be appropriate depending on network trust, identity, and compliance
+requirements; neither transport is claimed to be universally mandatory here.
+
+The selected supported Kong LTS is the Enterprise distribution
+`kong/kong-gateway:3.14.0.8-ubuntu`, operating in deprecated unlicensed free
+mode for this local demo.
+
+## Repository layout
+
+```text
+.
+├── .dockerignore                  # Excludes local/build files from image context
+├── Dockerfile                     # Go 1.25/Alpine multi-stage service image
+├── Makefile                       # Generation, verification, and Compose commands
+├── README.md                      # Authenticated local workflow
+├── docker-compose.yml             # Private service plus loopback-only Kong proxy
+├── go.mod / go.sum                # Go module and checksums
+├── index.html                     # REST browser client using the apikey header
+├── inventory.proto                # Inventory API and REST annotation
+├── kong.yml                       # DB-less routes, Consumers, and plugins
+├── main.go                        # Inventory gRPC service
+├── main_test.go                   # Service, auth, stream, and timing tests
+├── proto/gen/                     # Checked-in generated Go protobuf code
+└── third_party/google/api/        # Vendored HTTP annotation protos
+```
+
+Pinned runtime and generation versions:
+
+- Kong: `kong/kong-gateway:3.14.0.8-ubuntu`
+- builder: `golang:1.25-alpine3.24`
+- runtime: `alpine:3.24`
+- protobuf compiler: `protoc 35.1`
+- Go protobuf generator: `protoc-gen-go v1.36.11`
+- Go gRPC generator: `protoc-gen-go-grpc v1.6.2`

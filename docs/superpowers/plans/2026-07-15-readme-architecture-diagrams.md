@@ -143,7 +143,7 @@ Run:
 set -euo pipefail
 tool_dir="$(mktemp -d)"
 trap 'rm -rf "$tool_dir"' EXIT
-npm install --silent --prefix "$tool_dir" --ignore-scripts mermaid@11.16.0
+npm install --silent --prefix "$tool_dir" --ignore-scripts mermaid@11.16.0 jsdom@26.1.0
 
 overview="$(awk '
   /^```mermaid$/ { block++; next }
@@ -157,8 +157,18 @@ sequence="$(awk '
 ' README.md)"
 
 MERMAID_MODULE="$tool_dir/node_modules/mermaid/dist/mermaid.esm.min.mjs" \
+JSDOM_MODULE="$tool_dir/node_modules/jsdom/lib/api.js" \
 OVERVIEW="$overview" SEQUENCE="$sequence" \
 node --input-type=module -e '
+  const { JSDOM } = await import(process.env.JSDOM_MODULE);
+  const dom = new JSDOM("<!doctype html><html><body></body></html>");
+  Object.defineProperty(globalThis, "window", { value: dom.window, configurable: true });
+  Object.defineProperty(globalThis, "document", { value: dom.window.document, configurable: true });
+  Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
+  Object.defineProperty(globalThis, "Element", { value: dom.window.Element, configurable: true });
+  Object.defineProperty(globalThis, "HTMLElement", { value: dom.window.HTMLElement, configurable: true });
+  Object.defineProperty(globalThis, "SVGElement", { value: dom.window.SVGElement, configurable: true });
+  Object.defineProperty(globalThis, "Node", { value: dom.window.Node, configurable: true });
   const mermaid = (await import(process.env.MERMAID_MODULE)).default;
   const overview = await mermaid.parse(process.env.OVERVIEW, { suppressErrors: false });
   const sequence = await mermaid.parse(process.env.SEQUENCE, { suppressErrors: false });
@@ -168,7 +178,7 @@ node --input-type=module -e '
 '
 ```
 
-Expected: `Mermaid parse passed: flowchart-v2, sequence`. The temporary parser installation is removed by the trap and does not alter `package.json`, a lockfile, or any repository dependency.
+Expected: `Mermaid parse passed: flowchart-v2, sequence`. Both temporary packages are removed by the trap, and no repository dependency is added or recorded in `package.json` or a lockfile.
 
 - [ ] **Step 5: Verify scope and repository health**
 

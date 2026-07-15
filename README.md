@@ -26,9 +26,65 @@ through Kong on `127.0.0.1:8000`.
 The single loopback proxy port `127.0.0.1:8000` accepts both HTTP/1.1 REST and
 plaintext HTTP/2 gRPC (h2c):
 
-```text
-REST client -- HTTP/1.1 --> Kong :8000 -- gRPC/h2c --> inventory-service :50051
-gRPC client -- HTTP/2  --> Kong :8000 -- gRPC/h2c --> inventory-service :50051
+### Components and routing
+
+```mermaid
+flowchart LR
+    G["gRPC client<br/>grpcurl / Go"]
+    B["Browser<br/>index.html"]
+
+    subgraph KONG["Kong Gateway<br/>127.0.0.1:8000"]
+        direction TB
+        GR["Native gRPC route<br/>Host: inventory.local<br/><br/>Effective plugins:<br/>Key Auth (service)<br/>Rate limiting (service)"]
+        RR["REST route<br/>GET /v1/stock/{sku}<br/><br/>Effective plugins:<br/>Key Auth (service)<br/>Rate limiting (service)<br/>gRPC Gateway (route)<br/>CORS (route)"]
+        U["Authenticated upstream request<br/>apikey stripped<br/>X-Consumer-Username injected"]
+        GR --> U
+        RR --> U
+    end
+
+    S["inventory-service<br/>:50051 on Compose network only<br/><br/>GetStock (unary)<br/>StreamStockUpdates (server-streaming)"]
+
+    G -->|"h2c + :authority=inventory.local<br/>apikey"| GR
+    B -->|"HTTP/1.1 GET /v1/stock/{sku}<br/>apikey"| RR
+    U -->|"gRPC over h2c"| S
+```
+
+### Request sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant G as gRPC client
+    participant K as Kong :8000
+    participant S as inventory-service :50051
+
+    Note over B,S: REST GetStock (unary)
+    B->>K: GET /v1/stock/{sku} + apikey
+    K->>K: Match REST route
+    K->>K: Key Auth + rate limit (service scope)
+    K->>K: CORS + gRPC Gateway (REST route)
+    Note over K,S: apikey stripped, trusted Consumer metadata injected
+    K->>S: GetStock over h2c + X-Consumer-Username
+    S-->>K: GetStockResponse (protobuf)
+    K-->>B: HTTP JSON response
+
+    Note over G,S: Native gRPC (unary or server-streaming)
+    G->>K: h2c + :authority=inventory.local + apikey
+    K->>K: Match native gRPC route
+    K->>K: Key Auth + rate limit (service scope)
+    Note over K,S: apikey stripped, trusted Consumer metadata injected
+    alt GetStock (unary)
+        K->>S: GetStock + X-Consumer-Username
+        S-->>K: Unary protobuf response
+        K-->>G: Unary gRPC response
+    else StreamStockUpdates (server-streaming)
+        K->>S: StreamStockUpdates + X-Consumer-Username
+        loop Tenant snapshot in SKU order
+            S-->>K: StockUpdate
+            K-->>G: StockUpdate
+        end
+    end
 ```
 
 The native gRPC route is selected with the `inventory.local` authority. The

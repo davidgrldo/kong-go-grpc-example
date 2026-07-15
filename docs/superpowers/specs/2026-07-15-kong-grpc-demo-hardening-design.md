@@ -122,7 +122,7 @@ The protobuf wire shape stays unchanged. Comments in `inventory.proto` are updat
 
 ## Compose and Runtime
 
-The Kong image changes to `kong/kong-gateway:3.14.0.8-ubuntu`, the current 3.14 LTS patch selected for this design. It runs without an Enterprise license in deprecated free mode. This is an explicit tradeoff: the newest Apache-licensed `kong` image is already outside full support, while the actively supported LTS is distributed through `kong/kong-gateway`.
+The Kong image changes to `kong/kong-gateway:3.14.0.8-ubuntu`, the current 3.14 LTS patch selected for this design. Factual erratum: starting with Kong Gateway 3.10, Enterprise Free Mode is unavailable; license-free startup follows expired-license behavior. This is an explicit tradeoff: the newest Apache-licensed `kong` image is already outside full support, while the actively supported LTS is distributed through `kong/kong-gateway`.
 
 The Go builder changes to `golang:1.25-alpine3.24`, and the final runtime changes to `alpine:3.24`.
 

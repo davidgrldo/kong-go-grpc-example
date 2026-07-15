@@ -1156,7 +1156,7 @@ docker run --rm \
   kong config parse /kong/kong.yml
 ```
 
-Expected: Compose exits silently with zero; Kong reports that the file can be parsed and exits zero. Treat deprecation notices about unlicensed free mode as the documented image tradeoff, not as a schema failure.
+Expected: Compose exits silently with zero; Kong reports that the file can be parsed and exits zero. Factual erratum: starting with Kong Gateway 3.10, Enterprise Free Mode is unavailable, and license-free startup follows expired-license behavior; related license notices are separate from schema validation.
 
 Run these containment assertions:
 
@@ -1213,7 +1213,7 @@ Replace the current README content with these sections in order:
 9. `## Local-demo limitations` — list plaintext h2c, static public credentials, in-memory data, local rate limiting, permissive CORS, and no persistence. State that TLS or mTLS depends on the production threat model rather than claiming one transport is universally mandatory.
 10. `## Repository layout` — update image/tool versions and include `.dockerignore` and `main_test.go`.
 
-Name the exact runtime and generator versions: `kong/kong-gateway:3.14.0.8-ubuntu`, `golang:1.25-alpine3.24`, `alpine:3.24`, `protoc 35.1`, `protoc-gen-go v1.36.11`, and `protoc-gen-go-grpc v1.6.2`. Explain that the selected supported Kong LTS is the Enterprise distribution operating in deprecated unlicensed free mode.
+Name the exact runtime and generator versions: `kong/kong-gateway:3.14.0.8-ubuntu`, `golang:1.25-alpine3.24`, `alpine:3.24`, `protoc 35.1`, `protoc-gen-go v1.36.11`, and `protoc-gen-go-grpc v1.6.2`. Explain that the selected supported Kong LTS is the Enterprise distribution. Add a factual erratum that starting with Kong Gateway 3.10, Enterprise Free Mode is unavailable and license-free startup follows expired-license behavior.
 
 Document this pinned `grpcurl` installation when it is not already available:
 
